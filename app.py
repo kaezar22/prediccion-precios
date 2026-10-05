@@ -381,10 +381,16 @@ def ver_clima():
 
     st.subheader("Qué significa para los precios")
     st.write(
-        "Por ahora, nada firme. Se comparó la lluvia de los tres meses anteriores con el precio en Corabastos usando "
-        "tres fuentes de lluvia distintas, y no coinciden: con una fuente la acelga y el perejil subían después de meses "
-        "lluviosos, pero con las otras dos esa relación casi desaparece. Por eso el pronóstico de precios no usa el clima. "
+        "Poco. Se comparó la lluvia medida en la estación Granja Providencia del IDEAM, en Tenjo, con el precio en "
+        "Corabastos entre 2013 y 2026. Después de tres meses más lluviosos de lo normal, el perejil, la acelga y la "
+        "espinaca tienden a subir un poco; en cilantro casi no se nota. Al añadir la lluvia al pronóstico, solo mejoró "
+        "en perejil, apio y acelga, y empeoró en los demás. Por eso el pronóstico de precios no usa el clima. "
         "Esta sección sirve para vigilar las fincas: heladas, exceso de lluvia y sequía."
+    )
+    st.caption(
+        "Frente a esa estación, Open-Meteo acierta el nivel general de lluvia (91 mm al mes frente a 82 mm medidos), "
+        "pero exagera la de enero a marzo y se queda corta en octubre y noviembre. En esos dos meses la lluvia "
+        "\"normal\" que muestra esta sección es más baja que la real."
     )
     if punto.get("altura") is not None:
         st.caption(
