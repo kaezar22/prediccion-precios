@@ -1,6 +1,6 @@
 """Nutrienti - Predicción de precios de hortalizas (versión beta).
 
-Secciones: Resumen, Producto, Aciertos y Datos.
+Secciones: Resumen, Producto, Aciertos, Clima y Datos.
 Fuente de precios: SIPSA (DANE), mercado Corabastos, precio promedio por kilo.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from lib import datos, modelo
+from lib import clima, datos, modelo
 
 AZUL = "#2a78d6"      # precio observado
 NARANJA = "#eb6834"   # pronóstico
@@ -37,7 +37,7 @@ def mes_txt(f: pd.Timestamp) -> str:
 
 # ---------- datos y cálculos (en caché) ----------
 @st.cache_data(show_spinner=False)
-def leer_datos(_sello: float):
+def leer_datos(sello: float):
     mensual = datos.cargar_mensual()
     semanal = datos.cargar_semanal()
     completo, provisionales = datos.completar_con_semanal(mensual, semanal)
@@ -68,7 +68,7 @@ productos = list(resultados)
 
 st.sidebar.title("Predicción de precios")
 st.sidebar.caption("Corabastos, precio promedio por kilo (SIPSA - DANE). Versión beta.")
-seccion = st.sidebar.radio("Sección", ["Resumen", "Producto", "Aciertos", "Datos"], key="seccion")
+seccion = st.sidebar.radio("Sección", ["Resumen", "Producto", "Aciertos", "Clima", "Datos"], key="seccion")
 st.sidebar.divider()
 st.sidebar.caption(
     f"Mensual publicado hasta {mes_txt(mensual.index.max())}. "
@@ -290,6 +290,110 @@ def ver_aciertos():
     st.altair_chart(grafico_aciertos(p, h), width="stretch")
 
 
+# ---------- sección: Clima ----------
+@st.cache_data(ttl=6 * 3600, show_spinner="Consultando el clima en Open-Meteo...")
+def leer_clima(dia: str):
+    reciente, punto = clima.descargar_reciente()
+    historico = clima.descargar_historico()
+    return reciente, punto, historico
+
+
+def fecha_txt(f) -> str:
+    return f"{f.day} de {MESES[f.month - 1]}"
+
+
+def mm(x: float) -> str:
+    return "sin dato" if pd.isna(x) else f"{x:.0f} mm"
+
+
+def grafico_lluvia_diaria(reciente: pd.DataFrame, hoy):
+    desde = pd.Timestamp(hoy) - pd.Timedelta(days=30)
+    d = reciente.loc[desde:, ["lluvia"]].dropna().rename_axis("fecha").reset_index()
+    d["serie"] = d["fecha"].map(lambda f: "Pronóstico" if f.date() >= hoy else "Observado")
+    d["dia"] = d["fecha"].map(fecha_txt)
+    d["texto"] = d["lluvia"].map(lambda v: f"{v:.1f} mm".replace(".", ","))
+    return alt.Chart(d).mark_bar(cornerRadiusEnd=3).encode(
+        x=alt.X("fecha:T", title=None, axis=alt.Axis(format="%d/%m", labelAngle=0, tickCount=10)),
+        y=alt.Y("lluvia:Q", title="Lluvia (mm por día)"),
+        color=alt.Color("serie:N", scale=alt.Scale(domain=["Observado", "Pronóstico"], range=[AZUL, NARANJA]),
+                        legend=alt.Legend(title=None, orient="top")),
+        tooltip=[alt.Tooltip("dia:N", title="Día"), alt.Tooltip("serie:N", title="Tipo"), alt.Tooltip("texto:N", title="Lluvia")],
+    ).properties(height=300)
+
+
+def grafico_lluvia_mensual(tabla: pd.DataFrame):
+    d = tabla.copy()
+    d["mes_txt"] = d["mes"].map(mes_txt)
+    d["lluvia_txt"] = d["lluvia"].map(mm)
+    d["normal_txt"] = d["normal"].map(mm)
+    d["serie"] = "Lluvia del mes"
+    d["serie_normal"] = "Normal para ese mes"
+    eje_x = alt.X("yearmonth(mes):O", title=None, axis=alt.Axis(labelExpr=EJE_MES, labelAngle=0, labelOverlap=True))
+    tip = [alt.Tooltip("mes_txt:N", title="Mes"), alt.Tooltip("lluvia_txt:N", title="Lluvia"), alt.Tooltip("normal_txt:N", title="Normal")]
+    escala = alt.Scale(domain=["Lluvia del mes", "Normal para ese mes"], range=[AZUL, "#52514e"])
+    barras = alt.Chart(d).mark_bar(cornerRadiusEnd=3).encode(
+        x=eje_x, y=alt.Y("lluvia:Q", title="Lluvia (mm por mes)"),
+        color=alt.Color("serie:N", scale=escala, legend=alt.Legend(title=None, orient="top")), tooltip=tip)
+    marcas = alt.Chart(d).mark_tick(thickness=3, size=22).encode(
+        x=eje_x, y="normal:Q", color=alt.Color("serie_normal:N", scale=escala), tooltip=tip)
+    return (barras + marcas).properties(height=300)
+
+
+def frase_comparacion(c: dict) -> str:
+    if pd.isna(c["normal"]):
+        return "No hay años anteriores para comparar."
+    return f"Lo normal para esas fechas es {mm(c['normal'])} (promedio de {c['anios']} años, desde 2017)."
+
+
+def ver_clima():
+    st.title("Clima")
+    st.write(f"Lluvia y temperatura en {clima.LUGAR}, donde están las fincas. Fuente: Open-Meteo.")
+    hoy = clima.hoy_bogota()
+    try:
+        reciente, punto, historico = leer_clima(hoy.isoformat())
+    except Exception as e:  # sin conexión o el servicio no responde
+        st.error(f"No se pudo consultar el clima en este momento: {e}")
+        return
+    r = clima.resumen(reciente, historico, hoy)
+    u, p = r["ultimos_30"], r["proximos"]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Lluvia de los últimos 30 días", mm(u["total"]), pct(u["diferencia"]) + " frente a lo normal", delta_color="off")
+    c2.metric(f"Lluvia pronosticada, próximos {r['dias_pronostico']} días", mm(p["total"]), pct(p["diferencia"]) + " frente a lo normal", delta_color="off")
+    etiqueta_min = "Mínima más baja pronosticada" + (f" ({fecha_txt(r['dia_tmin'])})" if r["dia_tmin"] else "")
+    c3.metric(etiqueta_min, "sin dato" if pd.isna(r["tmin_prevista"]) else f"{r['tmin_prevista']:.1f} °C".replace(".", ","))
+    st.caption(f"Últimos 30 días: {frase_comparacion(u)} Próximos {r['dias_pronostico']} días: {frase_comparacion(p)}")
+
+    if r["dias_helada"]:
+        st.warning("Riesgo de helada: se pronostica una mínima de 2 °C o menos el " + ", ".join(fecha_txt(f) for f in r["dias_helada"]) + ".")
+    if r["dias_lluvia_fuerte"]:
+        st.warning("Lluvia fuerte (20 mm o más en un día) pronosticada el " + ", ".join(fecha_txt(f) for f in r["dias_lluvia_fuerte"]) + ".")
+    if not r["dias_helada"] and not r["dias_lluvia_fuerte"]:
+        st.info("Sin alertas de helada ni de lluvia fuerte en el pronóstico.")
+
+    st.subheader("Lluvia diaria: últimos 30 días y pronóstico")
+    st.altair_chart(grafico_lluvia_diaria(reciente, hoy), width="stretch")
+    st.caption("El pronóstico pierde precisión después de la primera semana; tome los días lejanos y su comparación con lo normal como tendencia.")
+
+    st.subheader("Lluvia por mes frente a lo normal")
+    st.altair_chart(grafico_lluvia_mensual(clima.mensual_vs_normal(reciente, historico, hoy)), width="stretch")
+    st.caption("La marca gris es el promedio de ese mismo mes en los demás años desde 2017.")
+
+    st.subheader("Qué significa para los precios")
+    st.write(
+        "Por ahora, nada firme. Se comparó la lluvia de los tres meses anteriores con el precio en Corabastos usando "
+        "tres fuentes de lluvia distintas, y no coinciden: con una fuente la acelga y el perejil subían después de meses "
+        "lluviosos, pero con las otras dos esa relación casi desaparece. Por eso el pronóstico de precios no usa el clima. "
+        "Esta sección sirve para vigilar las fincas: heladas, exceso de lluvia y sequía."
+    )
+    if punto.get("altura") is not None:
+        st.caption(
+            f"Punto consultado: latitud {punto['latitud']:.2f}, longitud {punto['longitud']:.2f}, altura {punto['altura']:.0f} m. "
+            "Los datos son una estimación para una celda de unos 9 km, no la medición de una estación."
+        )
+
+
+
 # ---------- sección: Datos ----------
 def ver_datos():
     st.title("Datos")
@@ -325,9 +429,9 @@ def ver_datos():
     st.subheader("Cómo funciona el pronóstico")
     st.write(
         "El modelo combina tres cosas: el nivel del producto en los últimos 12 meses, la época del año y qué tan lejos "
-        "está hoy el precio de ese nivel. No usa clima todavía. Los rangos y probabilidades salen de los errores "
+        "está hoy el precio de ese nivel. No usa clima. Los rangos y probabilidades salen de los errores "
         "que el modelo cometió al simular el pasado."
     )
 
 
-{"Resumen": ver_resumen, "Producto": ver_producto, "Aciertos": ver_aciertos, "Datos": ver_datos}[seccion]()
+{"Resumen": ver_resumen, "Producto": ver_producto, "Aciertos": ver_aciertos, "Clima": ver_clima, "Datos": ver_datos}[seccion]()
